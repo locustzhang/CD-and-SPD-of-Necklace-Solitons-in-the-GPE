@@ -111,7 +111,7 @@ def density_panel(ax, z, t_val, extent, letter,
             transform=ax.transAxes, color='white',  
             fontsize=10, fontweight='bold', va='top')  
     ax.set_xticks([]); ax.set_yticks([])  
-    panel_label(ax, letter, x=0.02, y=1.02)  
+    panel_label(ax, letter, x=0.02, y=1.08)  
     if highlight:  
         for spine in ax.spines.values():  
             spine.set_edgecolor('#ff4d6d')  
