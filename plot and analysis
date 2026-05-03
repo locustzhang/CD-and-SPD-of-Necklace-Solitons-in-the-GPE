@@ -1,0 +1,632 @@
+#!/usr/bin/env python3  
+# -*- coding: utf-8 -*-  
+"""  
+Necklace Soliton 论文图表与数据分析一体化脚本 (频谱增强完整版)  
+==============================================================  
+- 完全基于仿真生成的 JSON 和 .npy 快照，无需重新运行求解器。  
+- 新增频谱分析：区分物理湍流与数值碎片化。  
+- 自动生成 Fig1–Fig8 以及详细数据分析报告。  
+"""  
+  
+import os  
+import json  
+import glob  
+import numpy as np  
+import matplotlib  
+matplotlib.use('Agg')  
+import matplotlib.pyplot as plt  
+import matplotlib.colors as mcolors  
+import matplotlib.patches as mpatches  
+from matplotlib.gridspec import GridSpec  
+from matplotlib.colors import PowerNorm, LogNorm  
+from matplotlib.ticker import MaxNLocator, FormatStrFormatter, LogLocator  
+from collections import defaultdict  
+import numpy.fft as fft  
+  
+# ================== 频谱分析参数 ==================  
+PHYSICAL_TURBULENCE_K0_MIN = 1.5  # 仅当 k0 ≥ 1.5 才可能为物理湍流  
+PHYSICAL_TURBULENCE_RATIO_MIN = 0.15  # 高频能量占比阈值  
+  
+# ================== 全局配置 ==================  
+OUTPUT_DIR = "Necklace_Soliton_PUBLISHED"  
+  
+plt.rcParams.update({  
+    'figure.facecolor': 'white',  
+    'axes.facecolor': '#f8f9fa',  
+    'font.family': 'serif',  
+    'font.serif': ['DejaVu Serif'],  
+    'mathtext.fontset': 'stix',  
+    'font.size': 10,  
+    'axes.labelsize': 12,  
+    'axes.titlesize': 13,  
+    'xtick.direction': 'in',  
+    'ytick.direction': 'in',  
+    'xtick.major.size': 5,  
+    'ytick.major.size': 5,  
+    'axes.grid': False,  
+    'axes.linewidth': 1.0,  
+    'legend.frameon': False,  
+    'legend.fontsize': 10,  
+    'savefig.dpi': 600,  
+})  
+  
+C = dict(blue='#1f4e8c', red='#c0392b', green='#1a7a4a',  
+         orange='#d46a00', teal='#0e7f8a', grey='#555577')  
+  
+COLL_COLORS = {  
+    'quasi-elastic': '#2196F3',  
+    'fusion': '#FF9800',  
+    'fragmentation': '#9C27B0',  
+    'collapse': '#F44336',  
+    'numerical_fragmentation': '#AAAAAA',  
+    'transition': '#CCCC00',  
+    'physical_turbulence': '#2ecc71',  # 新增物理湍流颜色  
+}  
+  
+DENSITY_GAMMA = 0.45  
+DENSITY_VMIN_FLOOR = 1e-4  
+RADIAL_PROFILE_BINS = 120  
+  
+# ---------- 辅助函数 ----------  
+def style_ax(ax, minor=True):  
+    ax.spines['top'].set_visible(False)  
+    ax.spines['right'].set_visible(False)  
+    ax.spines['left'].set_linewidth(0.8)  
+    ax.spines['bottom'].set_linewidth(0.8)  
+    ax.tick_params(direction='in', width=0.7, length=4, which='major')  
+    ax.tick_params(direction='in', width=0.5, length=2, which='minor')  
+    if minor:  
+        ax.minorticks_on()  
+  
+def panel_label(ax, letter, x=-0.14, y=1.04):  
+    ax.text(x, y, f'({letter})', transform=ax.transAxes,  
+            fontsize=12, fontweight='bold', va='bottom', ha='left',  
+            fontfamily='serif')  
+  
+def add_shared_colorbar(fig, im, label=r'Density $|\psi|^2$',  
+                        rect=(0.92, 0.2, 0.02, 0.6),  
+                        fontsize=10, fmt='%.2f', n_ticks=5):  
+    cax = fig.add_axes(rect)  
+    cb = fig.colorbar(im, cax=cax)  
+    cb.set_label(label, fontsize=fontsize)  
+    cb.outline.set_visible(False)  
+    cb.locator = MaxNLocator(n_ticks)  
+    cb.formatter = FormatStrFormatter(fmt)  
+    cb.update_ticks()  
+    cb.ax.tick_params(labelsize=fontsize - 1)  
+    return cb  
+  
+def density_panel(ax, z, t_val, extent, letter,  
+                  highlight=False, gamma=None, vmin_floor=None, vmax=None):  
+    gamma = gamma or DENSITY_GAMMA  
+    vmin_floor = vmin_floor or DENSITY_VMIN_FLOOR  
+    rho = np.abs(z).T ** 2  
+    vmax = vmax or max(rho.max(), vmin_floor * 10)  
+    im = ax.imshow(  
+        rho, origin='lower', cmap=plt.cm.magma,  
+        norm=PowerNorm(gamma=gamma, vmin=vmin_floor, vmax=vmax),  
+        extent=extent, interpolation='bicubic',  
+    )  
+    ax.text(0.05, 0.90, fr'$t={t_val:.1f}$',  
+            transform=ax.transAxes, color='white',  
+            fontsize=10, fontweight='bold', va='top')  
+    ax.set_xticks([]); ax.set_yticks([])  
+    panel_label(ax, letter, x=0.02, y=1.02)  
+    if highlight:  
+        for spine in ax.spines.values():  
+            spine.set_edgecolor('#ff4d6d')  
+            spine.set_linewidth(2.2)  
+    return im  
+  
+# ---------- 频谱分析函数 ----------  
+def diagnose_physical_turbulence(rho_2d, k0_val, nx):  
+    """  
+    对密度快照进行频谱分析，判断是否为物理湍流。  
+    """  
+    psi_k = fft.fft2(rho_2d)  
+    psd = np.abs(psi_k) ** 2  
+  
+    freq = fft.fftfreq(nx)  
+    kx, ky = np.meshgrid(freq, freq)  
+    k_max = nx / 2  
+    k = np.sqrt(kx**2 + ky**2) * k_max  
+  
+    k_cutoff = k_max * 0.8  
+    total_energy = np.sum(psd) + 1e-30  
+    high_freq_energy = np.sum(psd[k > k_cutoff])  
+    ratio = high_freq_energy / total_energy  
+  
+    is_physical = (k0_val >= PHYSICAL_TURBULENCE_K0_MIN and  
+                   ratio >= PHYSICAL_TURBULENCE_RATIO_MIN)  
+    corrected_type = 'physical_turbulence' if is_physical else 'numerical_fragmentation'  
+    return corrected_type, ratio, is_physical  
+  
+# ---------- 数据加载 ----------  
+def load_json(fname):  
+    with open(os.path.join(OUTPUT_DIR, fname), 'r') as f:  
+        return json.load(f)  
+  
+def get_summary(data, key, default=None):  
+    sm = data.get('summary', {})  
+    return sm.get(key, default)  
+  
+def get_validation(data, key, default=None):  
+    val = data.get('validation', {})  
+    return val.get(key, default)  
+  
+# 加载基础 JSON  
+single = load_json("single_ring.json")  
+coll = load_json("collision_k1p5.json")  
+scan1d = load_json("scan1d.json")  
+conv = load_json("convergence.json")  
+scan2d = load_json("scan2d.json")  
+coll_scan_raw = load_json("collision_scan.json")  
+  
+# ---------- 频谱增强 ----------  
+def enhance_collision_scan(coll_scan_raw):  
+    enhanced = []  
+    for entry in coll_scan_raw:  
+        snap_files = entry.get('snap_files', [])  
+        if snap_files and os.path.exists(snap_files[-1]):  
+            z = np.load(snap_files[-1])  
+            rho = np.abs(z)**2  
+            cfg = entry.get('config', {})  
+            nx = cfg.get('Nx', 512)  
+            k0 = entry['k0']  
+            spec_type, ratio, is_phys = diagnose_physical_turbulence(rho, k0, nx)  
+            original_type = entry['type']  
+            if original_type in ('fragmentation', 'numerical_fragmentation') and is_phys:  
+                final_type = 'physical_turbulence'  
+            else:  
+                final_type = original_type  
+            entry['spec_type'] = final_type  
+            entry['high_freq_ratio'] = ratio  
+        else:  
+            entry['spec_type'] = entry['type']  
+            entry['high_freq_ratio'] = np.nan  
+        enhanced.append(entry)  
+    return enhanced  
+  
+coll_scan = enhance_collision_scan(coll_scan_raw)  
+  
+# ================== 绘图函数 ==================  
+def plot_fig1():  
+    snap_files = single.get('snap_files', [])  
+    if not snap_files:  
+        print("⚠️ No snapshots for SingleRing")  
+        return  
+    ts = single['timeseries']  
+    t_arr = np.array(ts['t'])  
+    cfg = single['config']  
+    Lx = cfg['Lx']  
+    extent = [-Lx, Lx, -Lx, Lx]  
+  
+    n = min(len(snap_files), len(t_arr))  
+    idx = [0, n//3, 2*n//3, n-1]  
+    fig = plt.figure(figsize=(9, 8.5))  
+    gs = GridSpec(2, 2, wspace=0.08, hspace=0.18, left=0.05, right=0.90, top=0.92, bottom=0.05)  
+    im_last = None  
+    for i, j in enumerate(idx):  
+        ax = fig.add_subplot(gs[i//2, i%2])  
+        z = np.load(snap_files[j])  
+        im = density_panel(ax, z, t_arr[j], extent, 'abcd'[i])  
+        im_last = im  
+    add_shared_colorbar(fig, im_last, r'$|\psi|^2$', rect=(0.92,0.2,0.02,0.6))  
+    fig.savefig(os.path.join(OUTPUT_DIR, 'Fig1_SingleRing.pdf'), bbox_inches='tight')  
+    plt.close()  
+    print("✅ Fig1_SingleRing.pdf")  
+  
+def plot_fig2():  
+    snap_files = coll.get('snap_files', [])  
+    if not snap_files:  
+        print("⚠️ No snapshots for Collision")  
+        return  
+    ts = coll['timeseries']  
+    t_arr = np.array(ts['t'])  
+    cfg = coll['config']  
+    Lx = cfg['Lx']  
+    extent = [-Lx, Lx, -Lx, Lx]  
+  
+    n = min(len(snap_files), len(t_arr))  
+    idx = np.linspace(0, n-1, 6, dtype=int)  
+    fig = plt.figure(figsize=(12, 7))  
+    gs = GridSpec(2, 3, wspace=0.05, hspace=0.15, left=0.03, right=0.92, top=0.92, bottom=0.05)  
+    im_last = None  
+    for i, j in enumerate(idx):  
+        ax = fig.add_subplot(gs[i//3, i%3])  
+        z = np.load(snap_files[j])  
+        im = density_panel(ax, z, t_arr[j], extent, 'abcdef'[i])  
+        im_last = im  
+    add_shared_colorbar(fig, im_last, r'$|\psi|^2$', rect=(0.94,0.2,0.02,0.6), fmt='%.1e')  
+    fig.savefig(os.path.join(OUTPUT_DIR, 'Fig2_Collision.pdf'), bbox_inches='tight')  
+    plt.close()  
+    print("✅ Fig2_Collision.pdf")  
+  
+def plot_fig3():  
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))  
+    plt.subplots_adjust(wspace=0.25)  
+  
+    for d, ls, suffix in [(single, '-', 'single'), (coll, '--', 'collision')]:  
+        ts = d['timeseries']  
+        t = np.array(ts['t'])  
+        ax1.semilogy(t, ts['E_err'], color=C['blue'], lw=1.2, ls=ls,  
+                     label=fr'$|\Delta H/H_0|$ ({suffix})')  
+        ax1.semilogy(t, ts['N_err'], color=C['green'], lw=1.2, ls=ls,  
+                     label=fr'$|\Delta N/N_0|$ ({suffix})')  
+        ax1.semilogy(t, ts['Lz_err'], color=C['orange'], lw=1.2, ls=ls,  
+                     label=fr'$|\Delta L_z|$ ({suffix})')  
+    ax1.set_xlabel('Time $t$')  
+    ax1.set_ylabel('Conservation error')  
+    ax1.set_title('Conservation of H, N, L_z', fontsize=10)  
+    ax1.legend(ncol=2, fontsize=8)  
+    style_ax(ax1); panel_label(ax1, 'a')  
+  
+    for d, col, lbl in [(single, C['blue'], 'Single ring'), (coll, C['red'], 'Collision')]:  
+        ts = d['timeseries']  
+        rho = np.array(ts['rho_max'])  
+        t = np.array(ts['t'])  
+        rho0 = d['summary']['rho0_max']  
+        ax2.plot(t, rho / rho0, color=col, lw=1.8, label=lbl)  
+    ax2.axhline(1.0, color='grey', ls=':', lw=1.0)  
+    ax2.set_xlabel('Time $t$')  
+    ax2.set_ylabel(r'$\rho_\mathrm{max}(t)/\rho_\mathrm{max}(0)$')  
+    ax2.legend(fontsize=10)  
+    style_ax(ax2); panel_label(ax2, 'b')  
+  
+    fig.savefig(os.path.join(OUTPUT_DIR, 'Fig3_Conservation.pdf'), bbox_inches='tight')  
+    plt.close()  
+    print("✅ Fig3_Conservation.pdf")  
+  
+def plot_fig4():  
+    rp = single.get('radial_profile')  
+    if rp is None:  
+        print("⚠️ No radial_profile data in single_ring.json")  
+        return  
+  
+    r_arr = np.array(rp['r'])  
+    rho_rt = np.array(rp['rho_rt']).T  
+    t_plot = np.array(single['timeseries']['t'])[:rho_rt.shape[1]]  
+  
+    gs_plot = np.array([e['g'] for e in scan1d])  
+    rho_ratio = np.array([get_summary(e, 'rho_ratio') for e in scan1d])  
+    n_free = np.array([get_validation(e, 'N_over_Ncr_free', np.nan) for e in scan1d])  
+    n_trap = np.array([get_validation(e, 'N_over_Ncr_trap', np.nan) for e in scan1d])  
+    valid = np.array([get_validation(e, 'N_cr_trap_valid', True) for e in scan1d])  
+  
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))  
+    im = ax1.pcolormesh(t_plot, r_arr, rho_rt, cmap=plt.cm.magma,  
+                        norm=PowerNorm(gamma=0.5), shading='gouraud')  
+    plt.colorbar(im, ax=ax1, label=r'$\langle|\psi|^2\rangle_\theta$')  
+    ax1.axhline(8.0, color='white', ls='--', lw=0.9, alpha=0.7)  
+    ax1.set_xlabel('Time $t$'); ax1.set_ylabel('Radius $r$')  
+    ax1.set_title('(a) Azimuthal-mean density', pad=10)  
+    style_ax(ax1); panel_label(ax1, 'a', y=1.06)  
+  
+    ax2.plot(gs_plot, rho_ratio, 'o-', color=C['blue'], lw=1.8, ms=6,  
+             label=r'$\rho_{\mathrm{max}}$ ratio')  
+    ax2_r = ax2.twinx()  
+    ax2_r.plot(gs_plot, n_free, 's--', color=C['grey'], lw=1, ms=4, alpha=0.6,  
+               label=r'$N/N_{\mathrm{cr}}^{\mathrm{free}}$')  
+    ax2_r.plot(gs_plot[valid], n_trap[valid], 'D-', color=C['orange'], lw=1.2, ms=5, alpha=0.8,  
+               label=r'$N/N_{\mathrm{cr}}^{\mathrm{trap}}$ (valid)')  
+    ax2_r.axhline(1.0, color=C['red'], ls=':', lw=0.9)  
+    ax2.set_xlabel(r'$g$'); ax2.set_ylabel(r'$\rho_{\mathrm{max}}$ ratio')  
+    ax2_r.set_ylabel(r'$N/N_{\mathrm{cr}}$', color=C['grey'])  
+    ax2_r.tick_params(axis='y', labelcolor=C['grey'])  
+    lines = ax2.get_legend_handles_labels()[0] + ax2_r.get_legend_handles_labels()[0]  
+    labs = ax2.get_legend_handles_labels()[1] + ax2_r.get_legend_handles_labels()[1]  
+    ax2.legend(lines, labs, fontsize=7.5, loc='upper left')  
+    ax2.set_title('(b) Stability vs $g$', pad=10)  
+    style_ax(ax2); panel_label(ax2, 'b', y=1.06)  
+  
+    fig.savefig(os.path.join(OUTPUT_DIR, 'Fig4_Stability.pdf'), bbox_inches='tight')  
+    plt.close()  
+    print("✅ Fig4_Stability.pdf")  
+  
+def plot_fig5():  
+    dt_res = conv.get('dt_results', [])  
+    nx_res = conv.get('nx_results', [])  
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))  
+    if dt_res:  
+        dts = np.array([r['dt'] for r in dt_res])  
+        sol = np.array([r['sol_err'] for r in dt_res])  
+        idx = np.argsort(dts)[::-1]  
+        dts, sol = dts[idx], sol[idx]  
+        ax1.loglog(dts, sol, '^-', color=C['teal'], lw=2, ms=8, label='Solution error')  
+        if len(dts) >= 2:  
+            ref2 = sol[0] * (dts / dts[0])**2  
+            ax1.loglog(dts, ref2, ':', color=C['red'], label=r'$\mathcal{O}(\Delta t^2)$')  
+        ax1.set_xlabel(r'$\Delta t$'); ax1.set_ylabel('Solution error')  
+        ax1.set_title('Temporal convergence', pad=12)  
+        ax1.legend(fontsize=9)  
+        style_ax(ax1); panel_label(ax1, 'a', y=1.10)  
+    if nx_res:  
+        dxs = np.array([r['config']['dx'] for r in nx_res])  
+        err = np.array([get_summary(r, 'max_E_err', 0) for r in nx_res])  
+        idx = np.argsort(dxs)[::-1]  
+        ax2.loglog(dxs[idx], err[idx], 's-', color=C['red'], lw=2, ms=8, label='Energy error')  
+        ax2.set_xlabel(r'$\Delta x$'); ax2.set_ylabel('Max rel. energy error')  
+        ax2.set_title('Spatial convergence', pad=12)  
+        ax2.legend(fontsize=9)  
+        style_ax(ax2); panel_label(ax2, 'b', y=1.10)  
+    fig.savefig(os.path.join(OUTPUT_DIR, 'Fig5_Convergence.pdf'), bbox_inches='tight')  
+    plt.close()  
+    print("✅ Fig5_Convergence.pdf")  
+  
+def plot_fig6():  
+    G_grid = np.array([scan2d[i][0]['g'] for i in range(len(scan2d))])  
+    V_grid = np.array([scan2d[0][j]['V_trap'] for j in range(len(scan2d[0]))])  
+    nG, nV = len(G_grid), len(V_grid)  
+    rho_mat = np.zeros((nG, nV))  
+    coll_mat = np.zeros((nG, nV))  
+    nocr_mat = np.zeros((nG, nV))  
+    valid_mat = np.ones((nG, nV), dtype=bool)  
+    for i in range(nG):  
+        for j in range(nV):  
+            p = scan2d[i][j]  
+            rho_mat[i,j] = get_summary(p, 'rho_ratio', 0)  
+            coll_mat[i,j] = 1.0 if get_summary(p, 'collapsed', False) else 0.0  
+            nocr_mat[i,j] = get_validation(p, 'N_over_Ncr_trap', np.nan)  
+            valid_mat[i,j] = get_validation(p, 'N_cr_trap_valid', True)  
+  
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 5))  
+    ext = [V_grid.min(), V_grid.max(), G_grid.min(), G_grid.max()]  
+  
+    vmin_pos = rho_mat[rho_mat>0].min() if np.any(rho_mat>0) else 1e-3  
+    im1 = ax1.imshow(rho_mat, origin='lower', aspect='auto', cmap=plt.cm.magma,  
+                     norm=LogNorm(vmin=vmin_pos, vmax=rho_mat.max()), extent=ext)  
+    plt.colorbar(im1, ax=ax1, label=r'$\rho_{\mathrm{max}}$ ratio')  
+    ax1.set_xlabel(r'$V_{\mathrm{trap}}$'); ax1.set_ylabel(r'$g$')  
+    ax1.set_title('(a) Peak density ratio')  
+    style_ax(ax1)  
+  
+    cmap_bin = mcolors.ListedColormap(['#2196F3', '#F44336'])  
+    im2 = ax2.imshow(coll_mat, origin='lower', aspect='auto', cmap=cmap_bin, vmin=0, vmax=1, extent=ext)  
+    if np.any(coll_mat) and np.any(1-coll_mat):  
+        ax2.contour(V_grid, G_grid, coll_mat, levels=[0.5], colors='white', linewidths=1.5)  
+    ax2.legend(handles=[mpatches.Patch(color='#2196F3', label='Stable'),  
+                        mpatches.Patch(color='#F44336', label='Collapsed')])  
+    ax2.set_xlabel(r'$V_{\mathrm{trap}}$'); ax2.set_ylabel(r'$g$')  
+    ax2.set_title('(b) Stability phase diagram')  
+    style_ax(ax2)  
+  
+    im3 = ax3.imshow(nocr_mat, origin='lower', aspect='auto', cmap=plt.cm.viridis, extent=ext, vmin=0, vmax=3)  
+    plt.colorbar(im3, ax=ax3, label=r'$N/N_{\mathrm{cr}}^{\mathrm{trap}}$')  
+    ax3.set_xlabel(r'$V_{\mathrm{trap}}$'); ax3.set_ylabel(r'$g$')  
+    ax3.set_title(r'(c) $N/N_{\mathrm{cr}}^{\mathrm{trap}}$')  
+    style_ax(ax3)  
+  
+    fig.savefig(os.path.join(OUTPUT_DIR, 'Fig6_PhaseDiagram.pdf'), bbox_inches='tight')  
+    plt.close()  
+    print("✅ Fig6_PhaseDiagram.pdf")  
+  
+def plot_fig7():  
+    fig = plt.figure(figsize=(12, 10))  
+    gs = GridSpec(2, 2, wspace=0.30, hspace=0.38, left=0.07, right=0.97, top=0.92, bottom=0.07)  
+    ax_ts = fig.add_subplot(gs[0,0]); ax_rr = fig.add_subplot(gs[0,1])  
+    ax_np = fig.add_subplot(gs[1,0]); ax_rc = fig.add_subplot(gs[1,1])  
+  
+    for r in coll_scan:  
+        col = COLL_COLORS.get(r['spec_type'], '#888888')  
+        ts = r['timeseries']  
+        t = np.array(ts['t'])  
+        rmax = np.array(ts['rho_max'])  
+        ax_ts.plot(t, rmax, color=col, lw=1.6, label=f"k0={r['k0']:.1f}")  
+        ax_rr.scatter(r['k0'], get_summary(r, 'rho_ratio'), color=col, s=70, zorder=3)  
+        ax_np.scatter(r['k0'], r['n_peaks'], color=col, s=70, zorder=3)  
+        ax_rc.scatter(r['k0'], r['radial_corr'], color=col, s=70, zorder=3)  
+  
+    ax_ts.set_xlabel(r'Time $t$'); ax_ts.set_ylabel(r'$\rho_\mathrm{max}$')  
+    ax_ts.legend(fontsize=7, ncol=2)  
+    style_ax(ax_ts); panel_label(ax_ts, 'a')  
+  
+    ax_rr.set_xlabel(r'$k_0$'); ax_rr.set_ylabel(r'$\rho_\mathrm{max}$ ratio')  
+    style_ax(ax_rr); panel_label(ax_rr, 'b')  
+  
+    ax_np.axhline(6, color=C['blue'], ls='-', lw=1.0, alpha=0.5, label='Initial')  
+    ax_np.axhline(12, color='grey', ls='--', lw=1.0, label='Fragmentation bound')  
+    ax_np.set_xlabel(r'$k_0$'); ax_np.set_ylabel(r'Peak count $n_p$')  
+    ax_np.legend(fontsize=8)  
+    style_ax(ax_np); panel_label(ax_np, 'c')  
+  
+    ax_rc.set_xlabel(r'$k_0$'); ax_rc.set_ylabel(r'Radial correlation $C_r$')  
+    ax_rc.set_ylim(-0.5, 1.05)  
+    style_ax(ax_rc); panel_label(ax_rc, 'd')  
+  
+    patches = [mpatches.Patch(color=c, label=k) for k,c in COLL_COLORS.items()]  
+    fig.legend(handles=patches, loc='upper center', ncol=len(patches), fontsize=9, bbox_to_anchor=(0.5, 0.97))  
+    fig.savefig(os.path.join(OUTPUT_DIR, 'Fig7_CollisionClass.pdf'), bbox_inches='tight')  
+    plt.close()  
+    print("✅ Fig7_CollisionClass.pdf")  
+  
+# ✅ 修改后的 plot_fig8 - type_order 匹配实际数据  
+def plot_fig8():  
+    """Fig8 — 2x2 网格展示四种典型碰撞类型的最终快照"""  
+    # 修改后：匹配实际数据中的类型（fusion, fragmentation, transition, numerical_fragmentation）  
+    type_order = ['fusion', 'fragmentation', 'transition', 'numerical_fragmentation']  
+      
+    # 若 physical_turbulence 存在，优先使用  
+    has_phys_turb = any(r['spec_type'] == 'physical_turbulence' for r in coll_scan)  
+    if has_phys_turb:  
+        type_order = ['fusion', 'physical_turbulence', 'transition', 'numerical_fragmentation']  
+  
+    shown = {}  
+    for t in type_order:  
+        for r in coll_scan:  
+            if r['spec_type'] == t and t not in shown:  
+                if r.get('snap_files') and os.path.exists(r['snap_files'][-1]):  
+                    shown[t] = r  
+                    break  
+  
+    if len(shown) < 4:  
+        print(f"⚠️ Found only {len(shown)} collision types, cannot fill 2x2 grid")  
+        return  
+  
+    fig = plt.figure(figsize=(14, 10))  
+    gs = GridSpec(2, 2, wspace=0.15, hspace=0.25, left=0.06, right=0.94, top=0.92, bottom=0.05)  
+    for idx, t in enumerate(type_order):  
+        ax = fig.add_subplot(gs[idx//2, idx%2])  
+        r = shown[t]  
+        z = np.load(r['snap_files'][-1])  
+        cfg = r['config']  
+        Lx = cfg['Lx']  
+        extent = [-Lx, Lx, -Lx, Lx]  
+        t_final = r['timeseries']['t'][-1]  
+        density_panel(ax, z, t_final, extent, 'abcd'[idx])  
+        ax.set_title(f"{t} ($k_0$={r['k0']:.1f})", fontsize=13,  
+                     color=COLL_COLORS.get(t, 'black'), fontweight='bold', pad=12)  
+        ax.set_xlim(-Lx*0.65, Lx*0.65)  
+        ax.set_ylim(-Lx*0.65, Lx*0.65)  
+    fig.savefig(os.path.join(OUTPUT_DIR, 'Fig8_CollisionSnapshots.pdf'), bbox_inches='tight')  
+    plt.close()  
+    print("✅ Fig8_CollisionSnapshots.pdf")  
+  
+# ================== 数据分析模块 ==================  
+def analyze_1d(scan1d):  
+    print("\n" + "="*92)  
+    print("📌 1. 1D 吸引相互作用强度扫描")  
+    print("="*92)  
+    if not scan1d:  
+        return {}  
+    print(f"共扫描 {len(scan1d)} 个 g 值\n")  
+    print(f"{'g':>8} {'ρ_ratio':>8} {'N/Ncr_free':>12} {'N/Ncr_trap':>12} {'E_err':>10} {'Ncr 有效':>8}")  
+    print("-" * 82)  
+    for it in scan1d:  
+        valid = "✓" if get_validation(it, 'N_cr_trap_valid', True) else "✗(外推)"  
+        gval = it['g']  
+        rho_ratio = get_summary(it, 'rho_ratio', 0)  
+        n_free = get_validation(it, 'N_over_Ncr_free', 0)  
+        n_trap = get_validation(it, 'N_over_Ncr_trap', 0)  
+        e_err = get_summary(it, 'max_E_err', 0)  
+        print(f"{gval:8.3f} {rho_ratio:8.3f} {n_free:12.3f} {n_trap:12.3f} {e_err:10.2e} {valid}")  
+    g_arr = np.array([it['g'] for it in scan1d])  
+    rho = np.array([get_summary(it, 'rho_ratio') for it in scan1d])  
+    n_trap = np.array([get_validation(it, 'N_over_Ncr_trap') for it in scan1d])  
+    print(f"\n统计总结：")  
+    print(f" ρ_ratio : 平均 = {rho.mean():.3f} [范围 {rho.min():.3f} — {rho.max():.3f}]")  
+    print(f" N/N_cr^trap : 平均 = {n_trap.mean():.2f} 最大 = {n_trap.max():.2f}")  
+    safe_idx = np.where(n_trap < 1.0)[0]  
+    if len(safe_idx) > 0:  
+        g_safe = g_arr[safe_idx[-1]]  
+        print(f" ✅ 静态安全区：g ≳ {g_safe:.3f} 时 N/N_cr^trap < 1")  
+    return {'rho_mean': float(rho.mean()), 'ncr_trap_max': float(n_trap.max())}  
+  
+def analyze_convergence(conv):  
+    print("\n" + "="*92)  
+    print("📌 2. 数值收敛性测试")  
+    print("="*92)  
+    if not conv:  
+        return {}  
+    dt_res = conv.get("dt_results")  
+    if dt_res:  
+        print("\n时间步长 (dt) 收敛：")  
+        for r in sorted(dt_res, key=lambda x: x['dt']):  
+            e_err = get_summary(r, 'max_E_err', 0)  
+            print(f" dt = {r['dt']:.0e} sol_err = {r['sol_err']:.2e} E_err = {e_err:.2e}")  
+    nx_res = conv.get("nx_results")  
+    if nx_res:  
+        print("\n空间分辨率 (Nx) 收敛：")  
+        for r in sorted(nx_res, key=lambda x: x['config']['dx']):  
+            e_err = get_summary(r, 'max_E_err', 0)  
+            print(f" Nx = {r['Nx']:4d} dx = {r['config']['dx']:.4f} E_err = {e_err:.2e}")  
+    return {}  
+  
+def analyze_2d(scan2d):  
+    print("\n" + "="*92)  
+    print("📌 3. 2D 稳定性相图 (g–V_trap)")  
+    print("="*92)  
+    if not scan2d:  
+        return {}  
+    total = collapsed = valid_ncr = 0  
+    rho_list = []  
+    for row in scan2d:  
+        for p in row:  
+            total += 1  
+            if get_summary(p, 'collapsed', False):  
+                collapsed += 1  
+            if get_validation(p, 'N_cr_trap_valid', True):  
+                valid_ncr += 1  
+            rho_list.append(get_summary(p, 'rho_ratio', 0))  
+    rho_arr = np.array(rho_list)  
+    print(f"总参数点：{total} | 塌缩比例：{collapsed/total*100:.2f}%")  
+    print(f"ρ_ratio 平均 = {rho_arr.mean():.3f}，最大 = {rho_arr.max():.3f}")  
+    print(f"N_cr 修正有效比例：{valid_ncr/total*100:.1f}%")  
+    if 0 < collapsed < total:  
+        print("\n稳定性边界（每个 g 值下首次出现塌缩的 V_trap）：")  
+        for row in scan2d:  
+            g = row[0]['g']  
+            for p in row:  
+                if get_summary(p, 'collapsed', False):  
+                    print(f" g = {g:.3f} → V_crit ≈ {p['V_trap']:.5f}")  
+                    break  
+    return {"collapse_fraction": collapsed / total}  
+  
+def analyze_collision(coll_scan):  
+    print("\n" + "="*92)  
+    print("📌 4. 双环碰撞动力学分类（含频谱修正）")  
+    print("="*92)  
+    if not coll_scan:  
+        return {}  
+    type_count = defaultdict(int)  
+    spec_count = defaultdict(int)  
+    for r in coll_scan:  
+        type_count[r['type']] += 1  
+        spec_count[r['spec_type']] += 1  
+    print("原始分类分布：")  
+    for t, cnt in sorted(type_count.items()):  
+        print(f" {t:22s} : {cnt:2d} 次 ({cnt/len(coll_scan)*100:5.1f}%)")  
+    print("\n频谱修正后分类分布：")  
+    for t, cnt in sorted(spec_count.items()):  
+        print(f" {t:22s} : {cnt:2d} 次 ({cnt/len(coll_scan)*100:5.1f}%)")  
+    print("\n详细数据（按 k0 排序）：")  
+    print(f"{'k0':>6} {'原始类型':22} {'修正类型':22} {'高频占比':>10} {'ρ_ratio':>8} {'峰数':>6} {'径向相关':>10}")  
+    print("-" * 100)  
+    for r in sorted(coll_scan, key=lambda x: x['k0']):  
+        ratio_str = f"{r['high_freq_ratio']:.3f}" if not np.isnan(r['high_freq_ratio']) else "N/A"  
+        print(f"{r['k0']:6.2f} {r['type']:22s} {r['spec_type']:22s} {ratio_str:>10} "  
+              f"{get_summary(r, 'rho_ratio', 0):8.3f} {r['n_peaks']:6d} {r['radial_corr']:10.3f}")  
+    phys_turb = [r for r in coll_scan if r['spec_type'] == 'physical_turbulence']  
+    if phys_turb:  
+        print(f"\n✅ 检测到 {len(phys_turb)} 个物理湍流事例")  
+        for r in phys_turb:  
+            print(f" k0={r['k0']:.2f}, 高频占比={r['high_freq_ratio']:.3f}")  
+    return {"type_counts": dict(type_count), "spec_counts": dict(spec_count)}  
+  
+def print_full_analysis():  
+    print("\n" + "="*115)  
+    print(" Necklace Soliton 数据分析报告（频谱增强版）")  
+    print("="*115)  
+    res1 = analyze_1d(scan1d)  
+    res2 = analyze_convergence(conv)  
+    res3 = analyze_2d(scan2d)  
+    res4 = analyze_collision(coll_scan)  
+    print("\n" + "="*115)  
+    print("📄 摘要")  
+    print("-"*100)  
+    if res1:  
+        print(f"• 1D 扫描：ρ_ratio 平均 = {res1.get('rho_mean', np.nan):.3f}")  
+        if res1.get('ncr_trap_max'):  
+            print(f" N/N_cr^trap 最大 = {res1['ncr_trap_max']:.2f}")  
+    if res3:  
+        print(f"• 2D 相图：塌缩比例 = {res3['collapse_fraction']*100:.1f}%")  
+    if res4:  
+        types = res4.get('type_counts', {})  
+        spec = res4.get('spec_counts', {})  
+        print(f"• 碰撞扫描：原始类型 {types}")  
+        print(f" 频谱修正后 {spec}")  
+    print("="*115)  
+  
+# ================== 主程序 ==================  
+if __name__ == "__main__":  
+    print_full_analysis()  
+    print("\n开始生成期刊图表...")  
+    plot_fig1()  
+    plot_fig2()  
+    plot_fig3()  
+    plot_fig4()  
+    plot_fig5()  
+    plot_fig6()  
+    plot_fig7()  
+    plot_fig8()  
+    print(f"\n所有图表已保存到 {OUTPUT_DIR}/")  
+    print("✅ 论文图表及数据分析全部完成！")  
