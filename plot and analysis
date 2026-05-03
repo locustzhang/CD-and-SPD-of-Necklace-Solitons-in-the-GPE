@@ -418,27 +418,30 @@ def plot_fig7():
   
     ax_ts.set_xlabel(r'Time $t$'); ax_ts.set_ylabel(r'$\rho_\mathrm{max}$')  
     ax_ts.legend(fontsize=7, ncol=2)  
-    style_ax(ax_ts); panel_label(ax_ts, 'a')  
+    style_ax(ax_ts); panel_label(ax_ts, 'a', y=1.00)  # ← 修改这里  
   
     ax_rr.set_xlabel(r'$k_0$'); ax_rr.set_ylabel(r'$\rho_\mathrm{max}$ ratio')  
-    style_ax(ax_rr); panel_label(ax_rr, 'b')  
+    style_ax(ax_rr); panel_label(ax_rr, 'b', y=1.00)  # ← 修改这里  
   
     ax_np.axhline(6, color=C['blue'], ls='-', lw=1.0, alpha=0.5, label='Initial')  
     ax_np.axhline(12, color='grey', ls='--', lw=1.0, label='Fragmentation bound')  
     ax_np.set_xlabel(r'$k_0$'); ax_np.set_ylabel(r'Peak count $n_p$')  
     ax_np.legend(fontsize=8)  
-    style_ax(ax_np); panel_label(ax_np, 'c')  
+    style_ax(ax_np); panel_label(ax_np, 'c', y=1.00)  # ← 修改这里  
   
     ax_rc.set_xlabel(r'$k_0$'); ax_rc.set_ylabel(r'Radial correlation $C_r$')  
     ax_rc.set_ylim(-0.5, 1.05)  
-    style_ax(ax_rc); panel_label(ax_rc, 'd')  
+    style_ax(ax_rc); panel_label(ax_rc, 'd', y=1.00)  # ← 修改这里  
   
-    patches = [mpatches.Patch(color=c, label=k) for k,c in COLL_COLORS.items()]  
+    # 只显示实际出现的类型  
+    actual_types = set(r['spec_type'] for r in coll_scan)  
+    patches = [mpatches.Patch(color=COLL_COLORS.get(t, '#888888'), label=t) for t in sorted(actual_types)]  
     fig.legend(handles=patches, loc='upper center', ncol=len(patches), fontsize=9, bbox_to_anchor=(0.5, 0.97))  
+      
     fig.savefig(os.path.join(OUTPUT_DIR, 'Fig7_CollisionClass.pdf'), bbox_inches='tight')  
     plt.close()  
     print("✅ Fig7_CollisionClass.pdf")  
-  
+
 # ✅ 修改后的 plot_fig8 - type_order 匹配实际数据  
 def plot_fig8():  
     """Fig8 — 2x2 网格展示四种典型碰撞类型的最终快照"""  
