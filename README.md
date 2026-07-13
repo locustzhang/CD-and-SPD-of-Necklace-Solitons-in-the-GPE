@@ -446,15 +446,7 @@ $$N_{\rm cr}(\Omega_{\rm trap}) = N_{\rm cr}(0)\Bigl(1 + 4\pi\frac{\Omega_{\rm t
 数据文件（JSON 和快照）可用于学术研究，引用时请注明：
 
 ```bibtex
-@article{Miao2026Necklace,
-  title = {Collision Dynamics and Stability Phase Diagram of Necklace Solitons in the Gross-Pitaevskii Equation},
-  author = {Miao, Xiaoyu and Song, Haoran and Zhang, Lipu},
-  journal = {Physical Review E},
-  year = {2026},
-  volume = {in press},
-  pages = {in press},
-  doi = {10.1103/PhysRevE.in.press},
-}
+被拒啦，伤心的不想投了，大家可以随便借鉴，修改。提我一句就行了。
 ```
 
 ---
